@@ -9,4 +9,6 @@ I’ve also included the output .csv files as examples.  Word_Counts.csv is gene
 
 Finally there is the example final visualisation, its Jane Austen stress tested (hahaha).
 
-Enjoy the data pretties.
+Enjoy the data pretties... or in this case not so pretty.  The code generated 10 communities using louvian sliding windows.  In this case they have overlapped massively to form a huge kinda brown blob.  Less data would help this be a prettier visualisation, but I love my Austen monstrosity...
+
+![image](FBH_Final.png)
