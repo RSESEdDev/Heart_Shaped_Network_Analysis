@@ -1,0 +1,559 @@
+---
+title: "Heart Shaped Network Analysis File 01 - Text Wrangling & Test Viz"
+author: "Developed by Honor McGregor with the patient assistance of ChatGPT"
+date: "2026-07-01"
+output: html_document
+---
+
+#POP Extract Data and Prepare for Network Analysis
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(officer)
+library(tibble)
+library(xml2)
+library(purrr)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(tidytext)
+library(SnowballC)
+library(widyr)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(RColorBrewer)
+library(viridis)
+library(textstem)
+
+```
+
+#WORKFLOW
+
+Word docs
+      ↓
+Extract
+      ↓
+Clean
+      ↓
+Dictionary
+      ↓
+Concept normalisation   ← only this changes
+      ↓
+Sliding windows
+      ↓
+Edges
+      ↓
+Communities
+
+
+
+# 01 Get Data from .Docx Files
+
+**Put all your feedback files (.docx) into one folder and direct the url in the first line in the block below.  This will collect the feedback, then clean it and remove stop words and write to Word_Counts.csv.  Prior to this I had already extracted the text from PDFs to docx in seperate R code.**
+
+```{r}
+folder <- "C:/Users/u1130196/OneDrive - Australian National University/Documents/The Feedback Heart/feedback/"
+
+files <- list.files(
+  folder,
+  pattern = "\\.docx$",
+  full.names = TRUE
+)
+
+read_doc_text <- function(file) {
+  doc <- read_docx(file)
+  txt <- docx_summary(doc)$text
+  txt <- txt[!is.na(txt)]
+  txt <- txt[txt != ""]
+  paste(txt, collapse = " ")
+}
+
+feedback <- tibble(
+  doc = basename(files),
+  txt = map_chr(files, read_doc_text)
+)
+
+head(feedback)
+```
+
+**Now tokenise text**
+
+```{r}
+words <- feedback %>%
+  unnest_tokens(word, txt)
+
+head(words)
+```
+
+# 02 Clean Text
+
+**Remove STOP words 1**
+
+```{r}
+words_clean <- words %>%
+  anti_join(stop_words, by = "word")
+```
+
+**view word count**
+
+Please point to the folder you want to save the .csv to!
+
+```{r}
+word_count <- words_clean %>%
+  count(word, sort = TRUE)
+
+head(word_count, 50)
+
+write.csv(word_count,
+          "C:/Users/u1130196/OneDrive - Australian National University/Documents/The Feedback Heart/Word_Counts.csv",
+          row.names = FALSE)
+```
+
+**check count of words for groups of 5, 10 and 20**
+
+```{r}
+word_count %>%
+  summarise(
+    Total = n(),
+    FiveOrMore = sum(n >= 5),
+    TenOrMore = sum(n >= 10),
+    TwentyOrMore = sum(n >= 20)
+  )
+```
+
+
+# 03 Keep Words
+
+**read edited spreadsheet back**
+
+In Word_Counts.csv add a column called 'keep'.  Mark each cell with a y = yes, or n = no to flag which words should be included. Save,close the excel file and then run the blocks below.
+
+```{r}
+dictionary <- read.csv("Word_Counts.csv")
+```
+
+```{r}
+head(dictionary)
+```
+
+**Filter dictionary for only Y to keep words**
+
+```{r}
+words_final <-
+  words_clean |>
+  semi_join(
+    dictionary |>
+      filter(tolower(trimws(keep)) == "y"),
+    by = "word"
+  )
+```
+
+**check**
+
+```{r}
+count(words_final, word, sort = TRUE)
+```
+
+```{r}
+head(words_final)
+```
+```{r}
+glimpse(words_final)
+```
+
+**add position of word order**
+
+```{r}
+words_final <- words_final %>%
+  group_by(doc) %>%
+  mutate(position = row_number()) %>%
+  ungroup()
+
+head(words_final)
+```
+
+```{r}
+glimpse(words_final)
+```
+
+# 04 Sliding Window ID
+
+**Create test Sliding-Window ID**
+
+```{r}
+window_size <- 5
+
+words_windowed <- words_final %>%
+  mutate(window = floor((position - 1) / window_size))
+
+head(words_windowed, 15)
+```
+
+**sliding window**
+
+this forms the Edge list!  Caution if only using 1 document you may get too many rows!
+
+
+**01 for multiple feedback docs**
+```{r}
+window_size <- 5
+
+word_pairs <- words_final %>%
+  select(doc, word, position) %>%
+  inner_join(
+    words_final %>% select(doc, word, position),
+    by = "doc",
+    suffix = c("_1", "_2")
+  ) %>%
+  filter(
+    word_1 != word_2,
+    position_2 > position_1,
+    position_2 <= position_1 + window_size
+  ) %>%
+  count(word_1, word_2, sort = TRUE)
+
+head(word_pairs, 30)
+```
+
+**02 code for only 1 feedback doc**
+
+```{r}
+words_final %>%
+  select(doc, word, position) %>%
+  arrange(position) %>%
+  head(10)
+```
+
+
+```{r}
+window_size <- 5
+
+word_pairs <- bind_rows(
+  lapply(1:window_size, function(i) {
+    
+    words_final %>%
+      arrange(doc, position) %>%
+      group_by(doc) %>%
+      transmute(
+        word_1 = word,
+        word_2 = lead(word, i)
+      ) %>%
+      ungroup()
+    
+  })
+) %>%
+  filter(
+    !is.na(word_2),
+    word_1 != word_2
+  ) %>%
+  count(word_1, word_2, sort = TRUE)
+
+head(word_pairs, 30)
+```
+
+**some quick checks**
+
+```{r}
+nrow(word_pairs)
+
+head(word_pairs, 20)
+
+summary(word_pairs$n)
+```
+
+# 05 Standarise Spelling
+
+Customise the list below as required.  This merges duplicates (both ways) and standardises spelling.
+
+```{r}
+spelling_fix <- c(
+  "humor" = "humour",
+  "humorous" = "humour",
+  "humours" = "humour",
+  
+  "learnt" = "learn",
+  "learned" = "learn",
+  "learning" = "learn",
+
+  "jokes" = "joke",
+
+  "ideas" = "idea",
+
+  "communicating" = "communicate",
+  "communicated" = "communicate"
+)
+
+word_pairs_clean <- word_pairs %>%
+  mutate(
+    word_1 = recode(word_1, !!!spelling_fix),
+    word_2 = recode(word_2, !!!spelling_fix)
+  )
+
+word_pairs_clean <- word_pairs_clean %>%
+  mutate(
+    from = pmin(word_1, word_2),
+    to   = pmax(word_1, word_2)
+  ) %>%
+  filter(from != to) %>%
+  count(from, to, wt = n, name = "weight", sort = TRUE)
+
+```
+
+```{r}
+head(word_pairs_clean, 20)
+```
+
+```{r}
+ls()
+```
+**Check for edges at different thresholds**
+
+```{r}
+word_pairs_clean %>%
+  summarise(
+    total_edges = n(),
+    weight_2plus = sum(weight >= 2),
+    weight_3plus = sum(weight >= 3),
+    weight_5plus = sum(weight >= 5),
+    weight_10plus = sum(weight >= 10),
+    weight_20plus = sum(weight >= 20)
+  )
+```
+
+**filter for edges >=3**
+
+```{r}
+edges3 <- word_pairs_clean %>%
+  filter(weight >= 3)
+nrow(edges3)
+```
+
+Check the number of edges, too many will overwhelm the final graph.
+
+**Create first draft graph**
+
+Directed=FALSE as the words are mutually associated, not directional.. eg science and humour are conceptually linked but there is no qualitative value.
+
+From chatty: "The network represents conceptual associations within the corpus. Edges indicate the strength of co-occurrence between concepts within a sliding text window and should be interpreted as conceptual proximity rather than agreement, causation, or positive/negative sentiment."
+
+```{r}
+g <- graph_from_data_frame(
+  d = edges3,
+  directed = FALSE
+)
+```
+
+**Edges >= 5**
+
+```{r}
+edges5 <- word_pairs_clean %>%
+  filter(weight >= 5)
+
+g <- graph_from_data_frame(
+  d = edges5,
+  directed = FALSE
+)
+```
+
+**Edges >= 10 **
+
+```{r}
+edges10 <- word_pairs_clean %>%
+  filter(weight >= 10)
+
+g <- graph_from_data_frame(
+  d = edges10,
+  directed = FALSE
+)
+```
+
+# 07 add word frequencies for node sizing
+
+```{r}
+node_counts <- words_final %>%
+  count(word, name = "count")
+
+V(g)$count <- node_counts$count[
+  match(V(g)$name, node_counts$word)
+]
+```
+
+check:
+
+```{r}
+head(data.frame(
+  word = V(g)$name,
+  count = V(g)$count
+))
+```
+
+# 08 Detect Communities
+
+```{r}
+communities <- cluster_louvain(g, weights = E(g)$weight)
+
+V(g)$community <- membership(communities)
+```
+
+**Cluster_Louvain = algorithm to detect communities. **
+
+```{r}
+sizes(communities)
+```
+
+**View community words**
+
+```{r}
+community_words <- data.frame(
+  word = V(g)$name,
+  community = V(g)$community,
+  count = V(g)$count
+)
+
+```
+
+By running the below block you should be able to see clusters (communities) of word groups.  Replace (n = x) below to limit the number of top words.
+
+**lil peek at the 3 top words in each community**
+
+```{r}
+community_words <- data.frame(
+  word = V(g)$name,
+  community = V(g)$community,
+  count = V(g)$count
+)
+
+top_words <- community_words %>%
+  group_by(community) %>%
+  arrange(desc(count), .by_group = TRUE) %>%
+  slice_head(n = 3) %>%
+  ungroup()
+
+top_words
+```
+
+
+# 09 Layout
+
+Preliminary layout to check it all works!
+
+**1 select layout**
+
+Using Fruchterman-Reingold.
+
+```{r}
+layout <- layout_with_fr(
+  g,
+  niter = 5000
+)
+```
+
+**2 Scale Node Sizes**
+
+```{r}
+V(g)$size <- scales::rescale(
+    V(g)$count,
+    to = c(6,25)
+)
+```
+
+**3. Define Edge Widths**
+
+```{r}
+E(g)$width <- scales::rescale(
+    E(g)$weight,
+    to = c(0.5,6)
+)
+```
+
+**4. Community Colors**
+
+```{r}
+cols <- viridis(
+  n = length(unique(V(g)$community)),
+  option = "mako"
+)
+
+V(g)$color <- cols[V(g)$community]
+```
+
+**5. Define Labels**
+
+```{r}
+V(g)$label.cex <- scales::rescale(
+    V(g)$count,
+    to = c(0.6,1.5)
+)
+```
+
+***deal with NAs**
+
+```{r}
+any(is.na(V(g)$count))
+any(is.na(layout))
+summary(layout)
+```
+
+***fix***
+
+```{r}
+V(g)$count[is.na(V(g)$count)] <- 1
+
+V(g)$size <- scales::rescale(V(g)$count, to = c(6, 25))
+
+V(g)$label.cex <- scales::rescale(V(g)$count, to = c(0.6, 1.5))
+```
+
+**6. Network!**
+
+```{r}
+plot(
+    g,
+    layout = layout,
+    vertex.frame.color = "white",
+    vertex.label.color = "black",
+    edge.color = "grey80",
+    main = "POPSICULE Concept Network"
+)
+```
+
+**Only use important labels >=15**
+
+```{r}
+V(g)$label <- ifelse(
+    V(g)$count >= 15,
+    V(g)$name,
+    ""
+)
+```
+
+**replot**
+
+```{r}
+plot(
+    g,
+    layout = layout,
+    vertex.frame.color = "white",
+    vertex.label.color = "black",
+    edge.color = "grey80",
+    main = "POPSICULE Concept Network"
+)
+```
+
+```{r}
+saveRDS(g, "g.rds")
+
+write.csv(word_pairs_clean,
+          "word_pairs_clean.csv",
+          row.names = FALSE)
+
+write.csv(community_words,
+          "community_words.csv",
+          row.names = FALSE)
+```
+

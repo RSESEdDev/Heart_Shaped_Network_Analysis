@@ -1,0 +1,744 @@
+---
+title: "Heart Shaped Network Analysis File 02 - Final Visualisation"
+author: "Developed by Honor McGregor with the patient assistance of ChatGPT"
+date: "2026-07-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# NETWORK ANALYSIS CONSTRAINED TO A HEART
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(ggrepel)
+```
+
+## 01 Rebuild the full network safely
+
+```{r}
+edges_full <- edges10 |>
+  select(from, to, weight)
+
+nodes_full <- tibble(
+  name = sort(unique(c(edges_full$from, edges_full$to)))
+) |>
+  left_join(
+    node_counts |>
+      transmute(
+        name = word,
+        Count = count
+      ),
+    by = "name"
+  ) |>
+  mutate(
+    Count = if_else(is.na(Count), 1L, Count),
+    Word = name
+  )
+```
+
+
+
+**Now detect communities:**
+
+```{r}
+g_temp <- igraph::graph_from_data_frame(
+  d = edges_full,
+  vertices = nodes_full,
+  directed = FALSE
+)
+
+communities_full <- igraph::cluster_louvain(
+  g_temp,
+  weights = igraph::E(g_temp)$weight
+)
+
+nodes_full <- nodes_full |>
+  mutate(
+    Group = as.character(igraph::membership(communities_full)[name])
+  )
+```
+
+# ============================================================
+# IMPORTANT: CHECK THE NUMBER OF COMMUNITIES
+# ============================================================
+#
+# Community detection is performed again here for the network
+# used in the heart visualisation.
+#
+# The number of communities may differ from those identified
+# earlier in the text/network analysis (File 01 fb_heart_data.Rmd).
+#
+# Check the communities before continuing:
+
+table(nodes_full$Group)
+
+# Note the number of communities returned.
+# You will need this number when setting up:
+#   - community anchors
+#   - community labels
+#   - community colours
+#   - community density layers
+
+**Now rebuild the graph with the community information included:**
+
+```{r}
+g_full <- igraph::graph_from_data_frame(
+  d = edges_full,
+  vertices = nodes_full,
+  directed = FALSE
+)
+
+graph_full <- as_tbl_graph(g_full)
+
+layout_base_full <- create_layout(
+  graph_full,
+  layout = "stress"
+)
+
+nrow(layout_base_full)
+```
+
+## 2. Create the mathematical heart properly
+
+```{r}
+t <- seq(0, 2*pi, length.out = 50000)
+
+heart_raw <- tibble(
+  t = t,
+  x = 16 * sin(t)^3,
+  y = 13*cos(t) - 5*cos(2*t) - 2*cos(3*t) - cos(4*t)
+) |>
+  mutate(
+    x = x - mean(x),
+    y = y - mean(y),
+    theta = atan2(y, x),
+    r = sqrt(x^2 + y^2)
+  )
+
+max_heart_r <- max(heart_raw$r)
+
+heart_boundary <- heart_raw |>
+  transmute(
+    x = x / max_heart_r,
+    y = y / max_heart_r
+  )
+
+heart_lookup <- heart_raw |>
+  mutate(
+    angle_bin = round(theta, 3)
+  ) |>
+  group_by(angle_bin) |>
+  summarise(
+    heart_radius = max(r) / max_heart_r,
+    .groups = "drop"
+  ) |>
+  arrange(angle_bin)
+
+R_heart <- approxfun(
+  x = heart_lookup$angle_bin,
+  y = heart_lookup$heart_radius,
+  rule = 2
+)
+```
+
+## 3. Map the full network into the heart
+
+```{r}
+layout_heartmap_full <- layout_base_full |>
+  as_tibble() |>
+  mutate(
+    x_centre = (min(x) + max(x)) / 2,
+    y_centre = (min(y) + max(y)) / 2,
+
+    x0 = x - x_centre,
+    y0 = y - y_centre,
+
+    theta = atan2(y0, x0),
+    r = sqrt(x0^2 + y0^2),
+
+    r_norm = r / max(r),
+
+    # smaller exponent = more spread toward the heart boundary
+    r_expanded = r_norm^0.30,
+
+    # margin inside the heart
+    r_scaled = 0.99 * r_expanded,
+
+    heart_radius = R_heart(theta),
+
+    x_heart = r_scaled * heart_radius * cos(theta),
+    y_heart = r_scaled * heart_radius * sin(theta)
+  )
+```
+
+
+**rebuild community_anchors**
+
+**add/subtract any communities as per count above**
+
+```{r}
+community_anchors <- tibble::tibble(
+  community = 1:10,
+
+  community_name = c(
+    "Community 1",
+    "Community 2",
+    "Community 3",
+    "Community 4",
+    "Community 5",
+    "Community 6",
+    "Community 7",
+    "Community 8",
+    "Community 9",
+    "Community 10"
+  ),
+
+  # Positions distributed through the heart
+  anchor_x = c(
+    -0.92,   # upper upper left
+    -0.72,   # upper upper left
+    -0.52,   # upper left
+     0.52,   # upper right
+     0.00,   # centre
+    -0.34,   # lower left
+     0.05,   # lower right
+     0.07,   # lower lower right
+     0.09,  # lower lower right
+     0.10    # lowest lower right
+  ),
+
+  anchor_y = c(
+     0.30,
+     0.30, 
+     0.30,
+     0.30,
+     0.02,
+    -0.34,
+    -1.05,
+    -1.05,
+    -1.05,
+    -1.05
+  )
+)
+```
+
+**rebuild community_centers**
+
+```{r}
+names(layout_heartmap_full)
+```
+
+```{r}
+layout_heartmap_full <- layout_heartmap_full |>
+  mutate(
+    community = as.integer(Group),
+    community_name = paste("Community", community)
+  )
+```
+
+```{r}
+layout_heartmap_full |>
+  distinct(community, community_name) |>
+  arrange(community)
+```
+
+```{r}
+community_centres <-
+  layout_heartmap_full |>
+  group_by(
+    community,
+    community_name
+  ) |>
+  summarise(
+    centre_x = mean(x_heart, na.rm = TRUE),
+    centre_y = mean(y_heart, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+community_centres
+```
+
+## Communities 1 **Layout spread**
+
+```{r}
+layout_spread <-
+  layout_heartmap_full |>
+  left_join(
+    community_centres,
+    by = c(
+      "community",
+      "community_name"
+    )
+  ) |>
+  left_join(
+    community_anchors |>
+      select(
+        community,
+        target_x = anchor_x,
+        target_y = anchor_y
+      ),
+    by = "community"
+  ) |>
+  mutate(
+    target_x = coalesce(target_x, centre_x),
+    target_y = coalesce(target_y, centre_y),
+
+    dx = x_heart - centre_x,
+    dy = y_heart - centre_y,
+
+    spread_factor =
+      if_else(
+        community == 5,
+        1.55,
+        1.25
+      ),
+    nudge_strength = 0.19,
+
+    x_tmp = centre_x + spread_factor * dx,
+    y_tmp = centre_y + spread_factor * dy,
+
+# Nudge community centre toward target
+    x_tmp =
+      x_tmp +
+      nudge_strength * (target_x - centre_x),
+
+    y_tmp =
+      y_tmp +
+      nudge_strength * (target_y - centre_y),
+
+# Expand the complete network outward
+    outward_scale = 1.45,
+
+    x_tmp = x_tmp * outward_scale,
+    y_tmp = y_tmp * outward_scale,
+
+# Constrain back inside heart
+    theta_tmp = atan2(y_tmp, x_tmp),
+    r_tmp = sqrt(x_tmp^2 + y_tmp^2),
+    r_allowed = 0.91 * R_heart(theta_tmp),
+
+    shrink = if_else(
+      r_tmp > 0,
+      pmin(1, r_allowed / r_tmp),
+      1
+    ),
+
+    x_plot = x_tmp * shrink,
+    y_plot = y_tmp * shrink
+  )
+```
+
+```{r}
+names(layout_spread)
+```
+
+## Rebuild edge coordinates for ggplot
+
+```{r}
+node_xy <- layout_spread |>
+  select(
+    name,
+    community,
+    Count,
+    x_plot,
+    y_plot
+  )
+
+edge_plot <- edges_full |>
+  left_join(
+    node_xy |>
+      select(
+        name,
+        x_from = x_plot,
+        y_from = y_plot
+      ),
+    by = c("from" = "name")
+  ) |>
+  left_join(
+    node_xy |>
+      select(
+        name,
+        x_to = x_plot,
+        y_to = y_plot
+      ),
+    by = c("to" = "name")
+  ) |>
+  filter(
+    !is.na(x_from),
+    !is.na(y_from),
+    !is.na(x_to),
+    !is.na(y_to)
+  )
+
+```
+
+## 5. Choose labels
+
+```{r}
+label_nodes <- layout_spread |>
+  slice_max(Count, n = 100, with_ties = FALSE)
+```
+
+**name categories**
+**add/subtract any communities as per count above**
+
+```{r}
+community_labels <- c(
+    "Community 1",
+    "Community 2",
+    "Community 3",
+    "Community 4",
+    "Community 5",
+    "Community 6",
+    "Community 7",
+    "Community 8",
+    "Community 9",
+    "Community 10"
+  )
+```
+
+**make soft pretty heart**
+
+```{r}
+heart_nice <- heart_boundary |>
+  mutate(
+    x = 1.02 * x,
+    y = 1.02 * y
+  )
+```
+
+**add/subtract any communities as per count above**
+
+```{r}
+# Current community IDs
+groups <- sort(unique(layout_spread$community))
+
+#Nine colours
+FBH_cols <- c(
+  "Community 1" = "#7c0063",   # burgundy
+  "Community 2" = "#e2aad7",   # pink
+  "Community 3" = "#03d9f5",   # blue
+  "Community 4" = "#ffbe0b",
+  "Community 5" = "#fd8a09",
+  "Community 6" = "#fb5607",
+  "Community 7" = "#5f5ff6",
+  "Community 8" = "#7dba60",
+  "Community 9" = "#ff006e",
+  "Community 10" = "#480ca8"
+)
+
+# Ensure the palette follows the communities in the data
+group_cols <- FBH_cols[paste("Community", groups)]
+names(group_cols) <- as.character(groups)
+```
+
+```{r}
+group_cols
+```
+
+
+## 6. Pretty heart plot
+
+```{r}
+FBH.p <- ggplot() +
+  geom_path(
+    data = heart_nice,
+    aes(x = x, y = y),
+    colour = "#C7A6E8",
+    linewidth = 1.3,
+    alpha = 0.18,
+    lineend = "round",
+    linejoin = "round"
+  ) +
+  geom_path(
+    data = heart_nice,
+    aes(x = x, y = y),
+    colour = "#A96BEA",
+    linewidth = 0.65,
+    alpha = 0.85,
+    lineend = "round",
+    linejoin = "round"
+  ) +
+
+# community background blobs
+  
+  ggforce::geom_mark_hull(
+    data = layout_spread,
+    aes(
+      x = x_plot,
+      y = y_plot,
+      group = as.factor(community),
+      fill = as.factor(community)
+    ),
+    concavity = 2,
+    expand = grid::unit(11, "mm"),
+    radius = grid::unit(16, "mm"),
+    alpha = 0.035,
+    colour = NA,
+    show.legend = TRUE
+  ) +
+    # 2. internal gradient washes
+  stat_density_2d(
+    data = layout_spread |> filter(community == groups[1]),
+    aes(
+      x = x_plot,
+      y = y_plot,
+      alpha = after_stat(0.80 * nlevel)
+    ),
+    geom = "polygon",
+    fill = group_cols[groups[1]],
+    contour_var = "ndensity",
+    bins = 5,
+    colour = NA,
+    show.legend = FALSE
+  ) +
+
+  stat_density_2d(
+    data = layout_spread |> filter(community == groups[2]),
+    aes(
+      x = x_plot,
+      y = y_plot,
+      alpha = after_stat(1.00 * nlevel)
+    ),
+    geom = "polygon",
+    fill = group_cols[as.character(groups[2])],
+    contour_var = "ndensity",
+    bins = 5,
+    show.legend = FALSE
+  ) +
+
+  stat_density_2d(
+    data = layout_spread |> filter(community == groups[3]),
+    aes(
+      x = x_plot,
+      y = y_plot,
+      alpha = after_stat(1.10 * nlevel)
+    ),
+    geom = "polygon",
+    fill = group_cols[as.character(groups[3])],
+    contour_var = "ndensity",
+    bins = 5,
+    show.legend = FALSE
+  ) +
+  stat_density_2d(
+  data = layout_spread |>
+    filter(community == groups[4]),
+  aes(
+    x = x_plot,
+    y = y_plot,
+    alpha = after_stat(1.00 * nlevel)
+  ),
+  geom = "polygon",
+  fill = group_cols[as.character(groups[4])],
+  contour_var = "ndensity",
+  bins = 5,
+  colour = NA,
+  show.legend = FALSE
+) +
+
+stat_density_2d(
+  data = layout_spread |>
+    filter(community == groups[5]),
+  aes(
+    x = x_plot,
+    y = y_plot,
+    alpha = after_stat(1.00 * nlevel)
+  ),
+  geom = "polygon",
+  fill = group_cols[as.character(groups[5])],
+  contour_var = "ndensity",
+  bins = 5,
+  colour = NA,
+  show.legend = FALSE
+) +
+
+  # edges
+  geom_segment(
+    data = edge_plot,
+    aes(
+      x = x_from,
+      y = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = weight
+    ),
+    colour = "grey35",
+    alpha = 1.1,
+    show.legend = FALSE
+  ) +
+
+# ----------------------------------------------------------
+# Broad, soft community clouds
+# ----------------------------------------------------------
+
+ggforce::geom_mark_hull(
+  data = layout_spread,
+  aes(
+    x = x_plot,
+    y = y_plot,
+    group = factor(community),
+    fill = factor(community)
+  ),
+  concavity = 1.8,
+  expand = grid::unit(19, "mm"),
+  radius = grid::unit(25, "mm"),
+  alpha = 0.025,
+  colour = NA,
+  show.legend = FALSE
+) +
+
+# A slightly tighter second cloud adds gentle depth
+ggforce::geom_mark_hull(
+  data = layout_spread,
+  aes(
+    x = x_plot,
+    y = y_plot,
+    group = factor(community),
+    fill = factor(community)
+  ),
+  concavity = 2.2,
+  expand = grid::unit(10, "mm"),
+  radius = grid::unit(17, "mm"),
+  alpha = 0.075,
+  colour = NA,
+  show.legend = FALSE
+) +
+
+  # nodes
+  geom_point(
+    data = layout_spread,
+    aes(
+      x = x_plot,
+      y = y_plot,
+      colour = as.factor(community),
+      size = Count
+    ),
+    alpha = 0.88
+  ) +
+
+  # word labels
+  geom_label_repel(
+    data = label_nodes,
+    aes(
+      x = x_plot,
+      y = y_plot,
+      label = name,
+      colour = as.factor(community)
+    ),
+    fill = "white",
+    label.size = NA,
+    alpha = 0.90,
+    size = 5.1,
+    max.overlaps = Inf,
+    min.segment.length = 0,
+    segment.alpha = 0.28,
+    show.legend = FALSE
+  ) +
+
+  # heart outline drawn last so it stays crisp
+  #geom_path(
+  #  data = heart_boundary,
+  #  aes(x = x, y = y),
+  #  colour = "purple",
+  #  linewidth = 0.7,
+  #  alpha = 0.65
+  #) +
+
+  scale_colour_manual(
+  values = group_cols,
+  labels = community_labels,
+  name = "Community"
+) +
+scale_fill_manual(
+  values = group_cols,
+  labels = community_labels,
+  guide = "none"
+) +
+scale_alpha_continuous(
+  range = c(0.012, 0.12),
+  guide = "none"
+) +
+scale_size_continuous(
+  range = c(1.5, 8),
+  name = "Count"
+) +
+scale_linewidth_continuous(
+  range = c(0.03, 0.45),
+  guide = "none"
+) +
+guides(
+  colour = guide_legend(
+    override.aes = list(
+      shape = 21,
+      fill = unname(group_cols),
+      colour = unname(group_cols),
+      alpha = 0.35,
+      size = 4,
+      stroke = 0.6
+    ),
+    order = 2
+  ),
+  size = guide_legend(order = 1)
+) +
+labs(
+  title = "A Heart-Shaped Keyword Network Monstrosity of Jane Austen Novels",
+  subtitle = "Keywords are mapped into a heart-constrained network anlysis layout and grouped into ten thematic communities.\nNode size reflects word frequency; edges indicate co-occurrence relationships.",
+  caption = "Communities identified using Louvain clustering. Figure created in R with a custom heart-constrained layout."
+) +
+coord_equal(clip = "off") +
+theme_void(base_size = 12) +
+theme(
+  legend.position = "right",
+  plot.background = element_rect(fill = "white", colour = NA),
+  panel.background = element_rect(fill = "white", colour = NA),
+  plot.margin = margin(20, 35, 20, 20),
+
+  plot.title = element_text(
+    size = 18,
+    face = "bold",
+    colour = "grey20",
+    hjust = 0
+  ),
+  plot.subtitle = element_text(
+    size = 11,
+    colour = "grey35",
+    hjust = 0,
+    lineheight = 1.2
+  ),
+  plot.caption = element_text(
+    size = 9,
+    colour = "grey45",
+    hjust = 0
+  ),
+  legend.title = element_text(
+    size = 11,
+    face = "bold"
+  ),
+  legend.text = element_text(
+    size = 10
+  )
+)
+```
+
+
+## 7.Print
+
+```{r}
+ggsave(
+  "C:/Users/u1130196/OneDrive - Australian National University/Documents/The Feedback Heart/FBH_Final.png",
+  plot = FBH.p,
+  width = 20,
+  height = 14,
+  dpi = 300
+)
+```
+
+
